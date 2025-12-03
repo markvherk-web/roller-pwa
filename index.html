@@ -1,0 +1,324 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<link rel="manifest" href="manifest.json">
+<link rel="icon" href="icon.png">
+<meta charset="utf-8" />
+<title>Birmingham Roller Flight</title>
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<style>
+html,body{height:100%;margin:0}
+canvas{display:block;width:100%;height:100%;background:linear-gradient(#aee0ff,#87ceeb)}
+#hud{position:absolute;left:12px;top:12px;font-family:sans-serif;color:#222;z-index:10}
+.pool-wrap{display:flex;gap:4px;flex-wrap:wrap;max-width:420px}
+.pool-dot{width:16px;height:16px;border-radius:3px;border:1px solid #222}
+</style>
+</head>
+<body>
+<canvas id="game"></canvas>
+<div id="hud"></div>
+<script>
+// --- Config ---
+const TOTAL_POOL = 15;
+const BASE_FLOCK = 6;
+const COLORS = ["#c0392b","#2980b9","#27ae60","#f1c40f","#8e44ad","#e67e22"];
+const MAX_LEVEL = 30;
+
+// --- Game state ---
+let level = 1, levelLandings = 0, highScore = 0;
+let pigeons = [], flyingIndices = [];
+let gameOver = false, gameStarted = false;
+
+const canvas = document.getElementById('game');
+const ctx = canvas.getContext('2d');
+const hud = document.getElementById('hud');
+const loft = { w: 100, h: 60, x:0, y:0 };
+
+function resize(){
+  canvas.width = window.innerWidth;
+  canvas.height = window.innerHeight;
+  loft.x = Math.round(canvas.width/2 - loft.w/2);
+  loft.y = canvas.height - loft.h - 10;
+}
+window.addEventListener('resize', resize);
+resize();
+
+let squeezing = false, hardSqueeze = false, touchStartY = null, activeTouches = 0;
+
+if(!window.pigeonPool){
+  window.pigeonPool = [];
+  for(let i=0;i<TOTAL_POOL;i++) window.pigeonPool.push({color:COLORS[i%COLORS.length],id:i,instance:null});
+}
+
+class Pigeon{
+  constructor(color){
+    this.color = color;
+    this.size = 18;
+    this.rollTimer = 0;
+    this.angle = 0;
+    this.alive = true;
+    this.wingPhase = 0;
+    this.resetInLoft();
+  }
+
+  resetInLoft(){
+    this.x = loft.x + loft.w/2 + (Math.random()-0.5)*10;
+    this.y = loft.y - 12;
+    this.vx = (Math.random()-0.5)*0.6;
+    this.vy = -3 - Math.random()*1.5;
+    this.onLoft = true;
+    this.alive = true;
+    this.rollTimer = 0;
+    this.angle = 0;
+    this.wingPhase = 0;
+  }
+
+  flap(){
+    if(!this.alive) return;
+    this.vy = -4 - Math.random()*1.5;
+    this.vx += (Math.random()-0.5)*1.2;
+    this.rollTimer = 18 + Math.floor(Math.random()*18);
+    this.onLoft = false;
+  }
+
+  update(centerX, centerY, squeezing, hard){
+    if(!this.alive) return;
+    if(hard){
+      this.vx += (centerX - this.x) * 0.18;
+      this.vy += (centerY - this.y) * 0.18;
+    } else if(squeezing){
+      this.vx += (centerX - this.x) * 0.08;
+      this.vy += (centerY - this.y) * 0.08;
+    }
+
+    this.vy += 0.14;
+    this.vx *= 0.995;
+    this.x += this.vx;
+    this.y += this.vy;
+
+    if(this.rollTimer > 0){
+      this.rollTimer--;
+      this.angle += 0.5 + Math.random()*0.4;
+    } else {
+      this.angle *= 0.92;
+    }
+
+    this.wingPhase += 0.3;
+
+    const inLoftX = this.x > loft.x && this.x < loft.x + loft.w;
+    const touchingLoftY = (this.y + this.size/2) >= loft.y && (this.y - this.size/2) <= (loft.y + loft.h);
+
+    // If bird lands next to loft or leaves screen => game over
+    if((this.y + this.size/2 > loft.y && !inLoftX) || this.y - this.size > canvas.height || this.x + this.size < 0 || this.x - this.size > canvas.width){
+      this.alive = false;
+      gameOver = true;
+      levelLandings = 0;
+      return;
+    }
+
+    // Successful landing in loft
+    if(inLoftX && touchingLoftY && this.vy >= 0){
+      this.y = loft.y - this.size/2;
+      this.vy = 0; this.vx = 0; this.rollTimer = 0; this.angle = 0; this.onLoft = true;
+      if(!gameOver){
+        levelLandings++;
+        if(levelLandings > highScore) highScore = levelLandings;
+        if(levelLandings >= 10){ level++; if(level > MAX_LEVEL) level = 1; levelLandings = 0; }
+        initLevel();
+      }
+    }
+  }
+
+  draw(ctx){
+    ctx.save();
+    ctx.translate(this.x, this.y);
+    ctx.rotate(this.angle);
+
+    // Birmingham Roller shape: rounder body + neck
+    ctx.fillStyle = this.color;
+
+    // Main body (rounder)
+    ctx.beginPath();
+    ctx.ellipse(0, 0, this.size*1.1, this.size*0.75, 0, 0, Math.PI*2);
+    ctx.fill();
+
+    // Neck
+    ctx.beginPath();
+    ctx.ellipse(this.size*0.45, -this.size*0.1, this.size*0.35, this.size*0.28, 0, 0, Math.PI*2);
+    ctx.fill();
+
+    // Head
+    ctx.beginPath();
+    ctx.ellipse(this.size*0.8, -this.size*0.12, this.size*0.32, this.size*0.32, 0, 0, Math.PI*2);
+    ctx.fill();
+
+    // Beak (short)
+    ctx.fillStyle = '#f39c12';
+    ctx.beginPath();
+    ctx.moveTo(this.size*0.95, -this.size*0.12);
+    ctx.lineTo(this.size*1.08, -this.size*0.10);
+    ctx.lineTo(this.size*0.95, -this.size*0.06);
+    ctx.closePath();
+    ctx.fill();
+
+    // Eye (orange with pupil)
+    ctx.fillStyle = 'orange';
+    ctx.beginPath();
+    ctx.arc(this.size*0.82, -this.size*0.14, this.size*0.10, 0, Math.PI*2);
+    ctx.fill();
+    ctx.fillStyle = 'black';
+    ctx.beginPath();
+    ctx.arc(this.size*0.84, -this.size*0.14, this.size*0.05, 0, Math.PI*2);
+    ctx.fill();
+
+    // Wings - rounded roller style, animated by wingPhase
+    ctx.fillStyle = this.color;
+    const wingFlap = Math.sin(this.wingPhase) * this.size * 0.65;
+
+    ctx.beginPath();
+    ctx.moveTo(-this.size*0.1, 0);
+    ctx.quadraticCurveTo(-this.size*1.0, -wingFlap*1.1, -this.size*0.4, -wingFlap*0.4);
+    ctx.quadraticCurveTo(-this.size*0.8, -wingFlap*0.1, -this.size*0.1, 0);
+    ctx.fill();
+
+    ctx.beginPath();
+    ctx.moveTo(-this.size*0.1, 0);
+    ctx.quadraticCurveTo(-this.size*1.0, wingFlap*1.1, -this.size*0.4, wingFlap*0.4);
+    ctx.quadraticCurveTo(-this.size*0.8, wingFlap*0.1, -this.size*0.1, 0);
+    ctx.fill();
+
+    // Tail
+    ctx.beginPath();
+    ctx.moveTo(-this.size*1.0, 0);
+    ctx.lineTo(-this.size*1.35, 6);
+    ctx.lineTo(-this.size*1.35, -6);
+    ctx.closePath();
+    ctx.fill();
+
+    // Tumbling white spin ring
+    if(this.rollTimer > 0){
+      ctx.strokeStyle = 'rgba(255,255,255,0.9)';
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      ctx.arc(0, 0, this.size + 6, 0, Math.PI*2);
+      ctx.stroke();
+    }
+
+    ctx.restore();
+  }
+}
+
+function initLevel(){
+  pigeons.length = 0; flyingIndices = [];
+  let temp = [...window.pigeonPool];
+  for(let i=0;i<BASE_FLOCK;i++){
+    const idx = Math.floor(Math.random()*temp.length);
+    const poolItem = temp.splice(idx,1)[0];
+    flyingIndices.push(poolItem.id);
+    let p = poolItem.instance;
+    if(!p){ p = new Pigeon(poolItem.color); poolItem.instance = p; }
+    p.resetInLoft();
+    pigeons.push(p);
+  }
+  gameOver = false; gameStarted = false;
+  updateHUD();
+}
+
+function flapAll(){ if(gameStarted && !gameOver) pigeons.forEach(p=>p.flap()); }
+function startGame(){ if(!gameStarted){ gameStarted=true; pigeons.forEach(p=>p.flap()); } }
+function restartIfOver(){ if(gameOver){ initLevel(); gameStarted=true; } }
+
+window.addEventListener('keydown', e=>{ if(e.code==='Space'||e.code==='Enter'){ startGame(); flapAll(); restartIfOver(); } });
+window.addEventListener('mousedown', ()=>{ startGame(); flapAll(); restartIfOver(); });
+
+window.addEventListener('touchstart', e=>{
+  e.preventDefault();
+  activeTouches = e.touches.length;
+  if(activeTouches===1) touchStartY = e.touches[0].clientY, hardSqueeze = false;
+  if(activeTouches>=2) hardSqueeze = true, squeezing = true;
+  startGame(); restartIfOver();
+},{passive:false});
+
+window.addEventListener('touchmove', e=>{
+  if(touchStartY==null) return;
+  squeezing = (touchStartY - e.touches[0].clientY) > 40;
+  activeTouches = e.touches.length;
+  if(activeTouches >= 2) hardSqueeze = true, squeezing = true;
+},{passive:false});
+
+window.addEventListener('touchend', e=>{
+  if(!squeezing && !hardSqueeze && !gameOver) flapAll();
+  squeezing = false; hardSqueeze = false; touchStartY = null; activeTouches = e.touches? e.touches.length : 0;
+},{passive:false});
+
+function drawSqueezeIndicator(){
+  if(!squeezing && !hardSqueeze) return;
+  ctx.save();
+  ctx.fillStyle = hardSqueeze ? 'rgba(200,30,30,0.22)' : 'rgba(0,140,255,0.14)';
+  ctx.fillRect(0,0,canvas.width,canvas.height);
+  const cx = canvas.width/2, cy = canvas.height*0.45;
+  ctx.fillStyle = 'rgba(255,255,255,0.15)';
+  ctx.beginPath(); ctx.arc(cx,cy,40,0,Math.PI*2); ctx.fill();
+  ctx.restore();
+}
+
+function drawLoft(){
+  ctx.fillStyle = '#8B5A2B'; ctx.fillRect(loft.x,loft.y,loft.w,loft.h);
+  ctx.strokeStyle = '#6b3f1f'; ctx.strokeRect(loft.x,loft.y,loft.w,loft.h);
+  ctx.fillStyle = '#fff'; ctx.font = '12px sans-serif'; ctx.textAlign = 'center';
+  ctx.fillText('Kit Box Loft', loft.x+loft.w/2, loft.y+loft.h/2+4);
+}
+
+function updateHUD(){
+  let poolHTML = '<div class="pool-wrap">';
+  for(let i=0;i<window.pigeonPool.length;i++){
+    const p = window.pigeonPool[i];
+    const isFlying = flyingIndices.includes(p.id);
+    const bg = isFlying ? '#87ceeb' : p.color;
+    poolHTML += `<div class="pool-dot" style="background:${bg}"></div>`;
+  }
+  poolHTML += '</div>';
+
+  hud.innerHTML = `
+    <div><strong>Level:</strong> ${level} &nbsp; <strong>Flock:</strong> ${pigeons.length} &nbsp; <strong>Landings:</strong> ${levelLandings} &nbsp; <strong>High Score:</strong> ${highScore}</div>
+    <div style="margin-top:4px; font-size:12px;">Tap=flap &nbsp;•&nbsp; SwipeUp=tighten &nbsp;•&nbsp; 2-finger=snap kit</div>
+    <div style="margin-top:6px; font-size:11px;">15 Birmingham Rollers (Blue = Flying)</div>
+    ${poolHTML}`;
+}
+
+function loop(){
+  ctx.clearRect(0,0,canvas.width,canvas.height);
+  ctx.fillStyle = 'rgba(60,130,60,0.08)'; ctx.fillRect(0,canvas.height-60,canvas.width,60);
+  drawLoft(); drawSqueezeIndicator();
+
+  let centerX = loft.x + loft.w/2, centerY = loft.y - 50;
+  if(pigeons.length>0){
+    centerX = pigeons.reduce((s,p)=>s+p.x,0)/pigeons.length;
+    centerY = pigeons.reduce((s,p)=>s+p.y,0)/pigeons.length;
+  }
+
+  if(gameStarted) pigeons.forEach(p=>{ p.update(centerX, centerY, squeezing, hardSqueeze); p.draw(ctx); });
+  else pigeons.forEach(p=>p.draw(ctx));
+
+  updateHUD();
+
+  if(gameOver){
+    ctx.fillStyle='rgba(0,0,0,0.55)'; ctx.fillRect(0,0,canvas.width,canvas.height);
+    ctx.fillStyle='#fff'; ctx.font='36px sans-serif'; ctx.textAlign='center';
+    ctx.fillText('Game Over', canvas.width/2, canvas.height/2);
+    ctx.font='16px sans-serif'; ctx.fillText('Tap or Click to Restart', canvas.width/2, canvas.height/2+40);
+  }
+
+  requestAnimationFrame(loop);
+}
+
+initLevel();
+loop();
+</script>
+<script>
+if ("serviceWorker" in navigator) {
+  navigator.serviceWorker.register("service-worker.js");
+}
+</script>
+</body>
+</html>
